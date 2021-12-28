@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<!--
+	This html document is meant to function as a 'boilerplate' system for the use of shaders
+	to compute all kinds of things in parallel. In particular, passing data into and back out
+	of the GPU should be easier with this setup.
+	Below, we use the javascript library 'regl' to simplify this process. It offers a
+	clean way to define data types, textures and shader code so that this remains simple.
+	We include two cases: writing the output to the screen, and writing output to a framebuffer
+	object (fbo) for exporting back into javascript.
+	The code also includes a frame-repeating loop for the shader to deal with time-dependent output.
+-->
+<html>
+<head>
+<!-- The line below is meant to avoid annoying JS errors in the console about missing favicon.ico things-->
+<link rel="shortcut icon" href="#"/>
+<meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" name="viewport"/>
+<meta charset=utf-8>
+</head>
+<body>
+</body>
+<!-- We can use either an online version of the regl library or a 'local' copy -->
+<script language="javascript" src="https://npmcdn.com/regl/dist/regl.js"></script>
+<!-- <script language="javascript" src="https://astro.ru.nl/~cbrinker/regl/regl.js"></script> -->
+<script language="javascript">
+
+const regl = createREGL({
+  // NOTE: the OES_texture_float extension is not supported for all browsers!
+  // For instance, it does not currently work on Chrome for Android (27-12-2021).
+  // A check should be added here to verify if this call is successful, and
+  // to display a clear warning to the user if not.
+  // A possible workaround, where a webgl2 context is hacked together with regl,
+  // can be found at https://issueexplorer.com/issue/regl-project/regl/561 .
+  // Webgl2 does allow for float texture use on Android / iOS (??).
+  extensions: 'OES_texture_float'
+//  attributes: {preserveDrawingBuffer: true}
+})
+
+// Here, we define a texture that is meant as a placeholder for input data for the shader.
+// It can be any size, and the internal referencing to its 'pixel' values inside the shader
+// is responsible for the correct use of this data.
+// Hence this can be data on model components, lists of input parameters, boundary conditions,
+// or any other source of numerical (float) data.
+const inputTexture = regl.texture({
+  width: 2,
+  height: 2,
+  format: 'rgba',
+  type: 'float',
+  data: [[1.5, 1.5, 1.5, 1.5],[1.7e5, 1.7e5, 1.7e5, 1.7e5],[5e-6, 5e-6, 5e-6, 5e-6],[0.02, 0.02, 0.02, 0.02]]
+})
+
+// Here we define the size of the output data placeholder structure as a second texture.
+// This can be any shape as well, as long as it abides by the rules for maximum texture size
+// on the GPU used (modern ones go up to 8192 x 8192 or so).
+// Interpretation of this data structure happens back in the javascript context.
+var FBO_xSize = 6
+var FBO_ySize = 6
+var outputTexture = regl.texture({
+  shape: [FBO_xSize, FBO_ySize],
+  format: 'rgba',
+  type: 'float'
+})
+
+// Things to implement and test:
+// - [WORKS] Write both to fbo and screen with separate shaders
+// - [WORKS] Make input and output texture larger and couple specific input pixels to specific output pixels
+// - [WORKS] Include an animation loop to generate a time series of output, once per frame - we use the regl.frame function for this.
+// - Set up a working calculation that outputs a result per frame and logs it
+
+const fbo = regl.framebuffer({color: outputTexture, depth: false, stencil: false, colorFormat: 'rgba32f', colorType: 'float'})
+
+// Explanation for steps below:
+// - We need to get the uv coords per pixel from the vertex shader and pass them on to the fragment shader.
+//   For this, we use a varying vec2 called 'uv'. It ranges from (0,0) to (1,1), spanning the full input texture.
+//   Note that, in general, the uv coordinates used do not vary according to the output pixel location in the fbo.
+//   Instead, the input texture has its own data structure and so every uv coordinate corresponds to a particular
+//   input parameter - its address should then be consistent across all fbo pixels.
+// - We need an input texture from which we get our floats, it is accessible from the fragment shader as a
+//   sampler2D object. Together with the uv coords it gives us a pixel colour (or 4 floats).
+// - For the FBO updater, we do not write to the screen but to the framebuffer. We indicate this in the
+//   setup of our function by including a 'framebuffer: () => fbo' entry, where the 'fbo' object
+//   has been created above. It uses an outputTexture which can have a size different from the viewport.
+
+const updateFbo = regl({
+  framebuffer: () => fbo,
+  vert: `
+    precision mediump float;		
+    attribute vec2 position;
+    varying vec2 uv;
+
+    void main() {
+      uv = 0.5 + 0.5 * vec2(position);
+      gl_Position = vec4(position, 0.0, 1.0);
+    }`,
+  frag: `
+    precision mediump float;
+    uniform sampler2D inputTexture;
+    uniform vec2 FboTextureSize;
+    varying vec2 uv;
+
+    int pixelIndex;
+
+    void main() {
+      //gl_FragColor = texture2D(inputTexture, uv);
+      pixelIndex = int(gl_FragCoord.x - 0.5) + int(FboTextureSize.y) * int(gl_FragCoord.y - 0.5);
+      gl_FragColor = vec4(pixelIndex, 0., 0., 1.);
+    }`,
+  attributes: {
+    position: regl.buffer([
+      [-1, -1],
+      [1, -1],
+      [1,  1],
+      [-1, -1],
+      [1,  1],
+      [-1,  1]
+    ])
+  },
+  count: 6,
+  uniforms: {
+    inputTexture: inputTexture,
+    FboTextureSize: [FBO_xSize, FBO_ySize]
+  }
+})
+
+// CDB Original return type is const
+var updateScreen = regl({
+  vert: `
+    precision mediump float;
+    varying vec2 uv;		
+    attribute vec2 position;
+    uniform vec2 center;
+
+    void main() {
+      uv = center + 0.5 * vec2(position);       
+      gl_Position = vec4(position, 0.0, 1.0);
+    }
+	`,
+  frag: `
+    precision mediump float;
+    varying vec2 uv;       
+    uniform sampler2D screenTexture;
+
+    void main() {
+      //gl_FragColor = vec4(gl_FragCoord.x / 1000., gl_FragCoord.y / 1000., 0.0, 1.);
+      gl_FragColor = texture2D(screenTexture, uv);
+    }
+	`,
+  attributes: {
+    position: function(context, props) {
+      return [
+      [-Math.cos(context.tick / 100), -Math.cos(context.tick / 100)],
+      [Math.cos(context.tick / 100), -Math.cos(context.tick / 100)],
+      [Math.cos(context.tick / 100), Math.cos(context.tick / 100)],
+      [-Math.cos(context.tick / 100), -Math.cos(context.tick / 100)],
+      [Math.cos(context.tick / 100),  Math.cos(context.tick / 100)],
+      [-Math.cos(context.tick / 100),  Math.cos(context.tick / 100)]
+      ];
+    }
+//    position: regl.buffer([
+//      [-Math.cos(context.tick / 100), -Math.cos(context.tick / 100)],
+//      [1, -1],
+//      [1, 1],
+//      [-1, -1],
+//      [1,  1],
+//      [-1,  1]
+//    ])
+  },
+  count: 6,
+  uniforms: {
+    screenTexture: regl.texture({
+      width: 2,
+      height: 2,
+      format: 'rgba',
+      type: 'float',
+      data: [[1., 0., 0., 1.], [0., 1., 0., 1.], [0., 0., 1., 1.], [1., 1., 0., 1.]]
+    }),
+    center: function(context) {
+      return [0.5 + 0.1 * Math.cos(context.tick / 200), 0.5 + 0.1 * Math.sin(context.tick / 200)];
+    }
+  }
+})
+
+// This is a command to clear the active output
+//regl.clear({color: [0., 0., 0., 1.], depth: 1});
+
+// This is a single call to draw to our FBO, executed only once
+updateFbo(() => {
+  regl.draw();
+  console.log(regl.read())
+});
+
+// This is a single call to draw to the screen, executed only once
+//updateScreen(() => {
+//  regl.draw();
+//});
+
+// This is a repeating call to draw to the screen
+regl.frame(function(context) {
+  updateScreen();
+});
+
+</script>
+</html>
